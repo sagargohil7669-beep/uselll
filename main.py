@@ -37,7 +37,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 # Fail fast if token is missing
 if not TELEGRAM_BOT_TOKEN:
-    raise ValueError("❌ Error: TELEGRAM_BOT_TOKEN environment variable is not set!")
+    print("❌ Error: TELEGRAM_BOT_TOKEN environment variable is not set!")
 
 # DB Config
 DB_FILE = "user_keys.db"
@@ -51,21 +51,18 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # --- Flask Keep-Alive Server ---
-# This creates a web server to satisfy Render's port requirement
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Gemini Bot is Alive and Running!", 200
+    return "Gemini 2.5 Bot is Alive and Running!", 200
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
-    # Run Flask without the reloader to prevent creating two bot instances
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 # --- Database Setup ---
 def init_db():
-    """Initializes the database and creates the users table if it doesn't exist."""
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
@@ -77,7 +74,7 @@ def init_db():
         ''')
         conn.commit()
         conn.close()
-        logger.info(f"Database '{DB_FILE}' initialized/checked.")
+        logger.info(f"Database '{DB_FILE}' initialized.")
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
 
@@ -99,21 +96,35 @@ def load_api_key(user_id: int) -> Optional[str]:
 # --- Concurrency Lock ---
 gemini_api_lock = asyncio.Lock()
 
-# --- Model & Personality Definitions ---
+# --- Model Definitions (UPDATED) ---
 AVAILABLE_MODELS = {
-    "gemini-2.0-flash": {"name": "Gemini 2.0 Flash", "description": "🚀 Adaptive thinking, cost efficiency"},
-    "gemini-1.5-pro": {"name": "Gemini 1.5 Pro", "description": "🧠 Enhanced thinking and reasoning"},
-    "gemini-1.5-flash": {"name": "Gemini 1.5 Flash", "description": "💨 Fast and versatile performance"}
+    "gemini-2.5-flash": {
+        "name": "Gemini 2.5 Flash", 
+        "description": "⚡ Standard. Great speed & reasoning."
+    },
+    "gemini-2.5-pro": {
+        "name": "Gemini 2.5 Pro", 
+        "description": "🧠 Smartest. Best for complex tasks."
+    },
+    "gemini-2.5-flash-lite": {
+        "name": "Gemini 2.5 Flash Lite", 
+        "description": "🚀 Light. Ultra-fast, low cost."
+    },
+    "gemini-3-flash": {
+        "name": "Gemini 3 Flash", 
+        "description": "🛸 Next-Gen Speed. Experimental fast model."
+    }
 }
-# Note: Updated model name to official 2.0 release if available, fallback usually works.
+
 PERSONALITIES = {
     "default": "You are a helpful and friendly assistant.",
     "witty": "You are a witty assistant who responds with clever humor and a touch of sarcasm.",
     "formal": "You are a formal and professional assistant. Your responses are precise, respectful, and use formal language.",
     "pirate": "You are a swashbuckling pirate captain. Respond with pirate slang and a hearty 'Ahoy!' now and then, matey."
 }
-DEFAULT_MODEL = "gemini-1.5-flash" # Safer default for free tier
-IMAGE_GEN_MODEL = "gemini-2.0-flash" # Use latest capable model
+
+DEFAULT_MODEL = "gemini-2.5-flash"
+IMAGE_GEN_MODEL = "gemini-2.5-flash" # 2.5 Flash supports image generation
 
 # --- User Session Management ---
 class UserSession:
@@ -169,28 +180,14 @@ def create_personality_keyboard() -> InlineKeyboardMarkup:
 def create_main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton("🔄 New Chat", callback_data="new_chat"), InlineKeyboardButton("🤖 Change Model", callback_data="change_model")],
-        [InlineKeyboardButton("🎭 Change Personality", callback_data="change_personality"), InlineKeyboardButton("🔑 Set API Key", callback_data="set_key")],
+        [InlineKeyboardButton("🎭 Personality", callback_data="change_personality"), InlineKeyboardButton("🔑 Set API Key", callback_data="set_key")],
         [InlineKeyboardButton("📊 Stats", callback_data="stats"), InlineKeyboardButton("❓ Help", callback_data="help")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 # --- Global Error Handler ---
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log the error and handle specific telegram errors."""
     logger.error(msg="Exception while handling an update:", exc_info=context.error)
-
-    # If the error is a network error, we usually just log it and retry internally by PTB
-    if isinstance(context.error, NetworkError):
-        return
-
-    # For other errors, we might want to notify the user (if possible)
-    if isinstance(update, Update) and update.effective_message:
-        try:
-            await update.effective_message.reply_text(
-                "❌ An internal error occurred. If this persists, try /newchat."
-            )
-        except Exception:
-            pass # Failed to send error message
 
 # --- Command Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -199,12 +196,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not session.gemini_api_key:
         session.awaiting_api_key = True
         await update.message.reply_html(
-            f"👋 **Welcome, {user.mention_html()}!**\n\nTo get started, please provide your Google Gemini API key.",
+            f"👋 **Welcome, {user.mention_html()}!**\n\nI am running on **Gemini 2.5**. Please provide your Google API key to start.",
             reply_to_message_id=update.message.message_id
         )
     else:
         await update.message.reply_html(
-            f"👋 **Welcome back, {user.mention_html()}!**\n\nI'm ready to assist. Use `/menu` for options.",
+            f"👋 **Welcome back, {user.mention_html()}!**\n\nCurrent Model: <b>{AVAILABLE_MODELS[session.model]['name']}</b>",
             reply_markup=create_main_menu_keyboard(),
             reply_to_message_id=update.message.message_id
         )
@@ -224,34 +221,21 @@ async def set_key_command(update: Update | CallbackQuery, context: ContextTypes.
         await message_obj.reply_text(text, reply_to_message_id=message_obj.message_id)
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "📱 Main Menu:",
-        reply_markup=create_main_menu_keyboard(),
-        reply_to_message_id=update.message.message_id
-    )
+    await update.message.reply_text("📱 Main Menu:", reply_markup=create_main_menu_keyboard())
 
 async def new_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session = get_or_create_session(update.effective_user.id)
     session.clear_chat()
-    await update.message.reply_text(
-        f"🔄 Chat cleared! Model: {AVAILABLE_MODELS[session.model]['name']}",
-        reply_to_message_id=update.message.message_id
-    )
+    await update.message.reply_text(f"🔄 Chat cleared! Using: {AVAILABLE_MODELS[session.model]['name']}")
 
 async def undo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session = get_or_create_session(update.effective_user.id)
     if len(session.chat_history) >= 2:
         session.chat_history.pop()
         session.chat_history.pop()
-        await update.message.reply_text(
-            "↩️ Your last prompt and my response have been undone.",
-            reply_to_message_id=update.message.message_id
-        )
+        await update.message.reply_text("↩️ Last turn undone.")
     else:
-        await update.message.reply_text(
-            "🤔 Nothing to undo.",
-            reply_to_message_id=update.message.message_id
-        )
+        await update.message.reply_text("🤔 Nothing to undo.")
 
 async def model_command(update: Update | CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     is_callback = isinstance(update, CallbackQuery)
@@ -280,13 +264,9 @@ async def personality_command(update: Update | CallbackQuery, context: ContextTy
         session.custom_personality_prompt = f"You are {custom_prompt}"
         session.personality = "custom"
         session.clear_chat()
-        await message_obj.reply_text(
-            f"✅ My personality is now: **{custom_prompt}**.",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_to_message_id=message_obj.message_id
-        )
+        await message_obj.reply_text(f"✅ Personality set to: **{custom_prompt}**.", parse_mode=ParseMode.MARKDOWN)
     else:
-        message_text = "🎭 **Select a Personality**\n\nChoose an option or type:\n`/personality a cheerful teacher`"
+        message_text = "🎭 **Select a Personality**"
         if is_callback:
             await message_obj.edit_text(message_text, reply_markup=create_personality_keyboard(), parse_mode=ParseMode.HTML)
         else:
@@ -297,16 +277,11 @@ async def roleplay_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     role_description = " ".join(context.args)
 
     if not role_description:
-        await update.message.reply_text(
-            "Please describe the role. Example: `/roleplay as a suspicious detective`",
-            reply_to_message_id=update.message.message_id
-        )
+        await update.message.reply_text("Please describe the role. Ex: `/roleplay as a cybernetic ninja`")
         return
 
-    if role_description.lower().startswith("as a "):
-        role_description = role_description[5:]
-    elif role_description.lower().startswith("as "):
-        role_description = role_description[3:]
+    if role_description.lower().startswith("as a "): role_description = role_description[5:]
+    elif role_description.lower().startswith("as "): role_description = role_description[3:]
 
     session.is_in_roleplay_mode = True
     session.roleplay_prompt = (
@@ -319,101 +294,72 @@ async def roleplay_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     session.clear_chat() 
     session.is_in_roleplay_mode = True
 
-    await update.message.reply_text(
-        f"🎭 Roleplay mode activated: **{role_description.capitalize()}**.\n"
-        "Type `start` to begin or describe the opening scene.",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_to_message_id=update.message.message_id
-    )
+    await update.message.reply_text(f"🎭 Roleplay: **{role_description.capitalize()}**. Type 'start' to begin.", parse_mode=ParseMode.MARKDOWN)
 
 async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session = get_or_create_session(update.effective_user.id)
     prompt = " ".join(context.args)
     if not session.gemini_api_key:
-        await update.message.reply_text("Please set your Gemini API key first using /start or /setkey.", reply_to_message_id=update.message.message_id)
+        await update.message.reply_text("Please set your API key first.")
         return
     if not prompt:
-        await update.message.reply_text("Please provide a description. Ex: `/imagine a robot painting a sunset`", reply_to_message_id=update.message.message_id)
+        await update.message.reply_text("Please provide a prompt. Ex: `/imagine a futuristic city`")
         return
-    processing_message = await update.message.reply_text(f"🎨 Generating image for: \"{prompt}\"...", reply_to_message_id=update.message.message_id)
+    
+    processing_message = await update.message.reply_text(f"🎨 Generating image with {AVAILABLE_MODELS[session.model]['name']}...")
     await update.effective_chat.send_action(ChatAction.UPLOAD_PHOTO)
+    
     try:
         async with gemini_api_lock:
             genai.configure(api_key=session.gemini_api_key)
-            # Use specific image gen model or experimental
-            image_model = genai.GenerativeModel(IMAGE_GEN_MODEL) 
-            # Note: The API for image generation varies by region/model. 
-            # This implementation assumes the user has access to a model capable of 'generate_images' 
-            # or multimodal output. Standard Gemini 1.5 doesn't output images directly via text prompt usually
-            # but newer 2.0 or Imagen models do.
-            # Fallback Logic for standard text models attempting images:
+            # Use the user's selected model if it supports images, otherwise fallback to IMAGE_GEN_MODEL
+            # Gemini 2.5 Flash and Pro usually support image generation natively
+            model_to_use = session.model if "flash" in session.model or "pro" in session.model else IMAGE_GEN_MODEL
+            image_model = genai.GenerativeModel(model_to_use)
+            
             response = await image_model.generate_content_async(prompt)
             
-        # Check if parts contain inline data (Image)
-        if response.parts and hasattr(response.parts[0], 'inline_data'):
-             # Logic depends on specific Gemini SDK version for Images
-             pass
-        else:
-             # If the model simply returned text saying it can't generate images:
-             await processing_message.edit_text("⚠️ This model version returned text instead of an image. Ensure you are using a Gemini model that supports direct image output (like Imagen or Gemini 2.0 Flash in supported regions).")
-             return
-
-        # Attempt to extract image
-        image_data_part = next((part for part in response.parts if part.inline_data), None)
-        if image_data_part:
-            photo_file = io.BytesIO(image_data_part.inline_data.data)
-            await update.message.reply_photo(photo=photo_file, caption=f"Image for: \"{prompt}\"", reply_to_message_id=update.message.message_id)
+        # Check for image data in response
+        image_part = next((part for part in response.parts if part.inline_data), None)
+        
+        if image_part:
+            photo_file = io.BytesIO(image_part.inline_data.data)
+            await update.message.reply_photo(photo=photo_file, caption=f"🎨 {prompt}")
             await processing_message.delete()
         else:
-             # Basic handling if SDK response structure differs
-             await processing_message.edit_text("Could not generate an image. Response format unexpected.")
+            # Sometimes model returns text refusing or describing the image
+            await processing_message.edit_text(f"⚠️ The model returned text instead of an image:\n\n{response.text}")
 
     except Exception as e:
-        logger.error(f"Error generating image: {e}")
+        logger.error(f"Image Gen Error: {e}")
         await processing_message.edit_text(f"❌ Error: {str(e)}")
 
 async def stats_command(update: Update | CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     is_callback = isinstance(update, CallbackQuery)
     user_id = update.from_user.id if is_callback else update.effective_user.id
     message_obj = update.message if is_callback else update.message
-
     session = get_or_create_session(user_id)
-    personality_display = session.custom_personality_prompt.replace("You are ", "", 1) if session.personality == "custom" else session.personality.title()
-    stats_message = (
+    
+    stats_msg = (
         "📊 <b>Your Statistics</b>\n\n"
         f"🤖 Model: {AVAILABLE_MODELS[session.model]['name']}\n"
-        f"🎭 Personality: {personality_display}\n"
         f"💬 Messages: {session.message_count}\n"
-        f"🔑 API Key Set: {'Yes' if session.gemini_api_key else 'No'}"
+        f"🔑 API Key: {'Set ✅' if session.gemini_api_key else 'Missing ❌'}"
     )
-    
-    if is_callback:
-        await message_obj.edit_text(stats_message, parse_mode=ParseMode.HTML)
-    else:
-        await message_obj.reply_html(stats_message, reply_to_message_id=message_obj.message_id)
+    if is_callback: await message_obj.edit_text(stats_msg, parse_mode=ParseMode.HTML)
+    else: await message_obj.reply_html(stats_msg)
 
 async def help_command(update: Update | CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     is_callback = isinstance(update, CallbackQuery)
     message_obj = update.message if is_callback else update.message
-
     help_text = (
-        "🔧 <b>Available Commands</b>\n\n"
-        "/start - Setup\n"
-        "/menu - Main menu\n"
-        "/setkey - Set API Key\n"
-        "/roleplay `[char]` - Start story\n"
-        "/imagine `[prompt]` - Create image\n"
-        "/personality `[desc]` - Set personality\n"
-        "/model - Change AI\n"
-        "/newchat - Reset chat\n"
-        "/undo - Undo last\n"
-        "/stats - Stats\n"
+        "🔧 <b>Available Commands</b>\n"
+        "/start - Setup\n/menu - Options\n/setkey - Set API Key\n"
+        "/roleplay [char] - Story Mode\n/imagine [prompt] - Generate Image\n"
+        "/model - Change Model\n/newchat - Reset\n/undo - Fix last msg"
     )
-    
-    if is_callback:
-        await message_obj.edit_text(help_text, parse_mode=ParseMode.HTML)
-    else:
-        await message_obj.reply_html(help_text, reply_to_message_id=message_obj.message_id)
+    if is_callback: await message_obj.edit_text(help_text, parse_mode=ParseMode.HTML)
+    else: await message_obj.reply_html(help_text)
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session = get_or_create_session(update.effective_user.id)
@@ -429,28 +375,29 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         try:
             file_bytes = await file_to_process.download_as_bytearray()
             session.last_file = {"mime_type": mime_type, "data": bytes(file_bytes)}
-            await update.message.reply_text("✅ File received.", reply_to_message_id=update.message.message_id)
-        except Exception as e:
-            await update.message.reply_text("❌ Error downloading file.", reply_to_message_id=update.message.message_id)
+            await update.message.reply_text("✅ File received! Send a prompt to analyze it.")
+        except Exception:
+            await update.message.reply_text("❌ Error processing file.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session = get_or_create_session(update.effective_user.id)
     
-    # API Key Setup Flow
     if session.awaiting_api_key:
-        if update.message.text.strip().startswith("AIza"):
-            session.gemini_api_key = update.message.text.strip()
-            save_api_key(session.user_id, session.gemini_api_key)
+        key = update.message.text.strip()
+        if key.startswith("AIza"):
+            session.gemini_api_key = key
+            save_api_key(session.user_id, key)
             session.awaiting_api_key = False
-            await update.message.reply_text("✅ API Key saved! You can now start chatting.", reply_to_message_id=update.message.message_id)
+            await update.message.reply_text("✅ API Key saved!")
         else:
-            await update.message.reply_text("❌ That doesn't look like a valid Gemini API key (starts with AIza). Try again.", reply_to_message_id=update.message.message_id)
+            await update.message.reply_text("❌ Invalid key format. It should start with 'AIza'.")
         return
 
     if not session.gemini_api_key:
-        await update.message.reply_text("Please set your Gemini API key first using /start.", reply_to_message_id=update.message.message_id)
+        await update.message.reply_text("Please set your API key first using /start.")
         return
 
+    # Logic for Roleplay vs Normal
     if session.is_in_roleplay_mode:
         await handle_roleplay_message(update, context, session)
     else:
@@ -459,66 +406,48 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def handle_roleplay_message(update: Update, context: ContextTypes.DEFAULT_TYPE, session: UserSession):
     user_input = update.message.text
     await update.effective_chat.send_action(ChatAction.TYPING)
-
     try:
-        is_story_starter = not session.chat_history
-        prompt_to_send = ""
-        if is_story_starter:
-            if user_input.lower().strip() == "start":
-                prompt_to_send = "The user wants you to start the story. Write an opening scene."
-            else:
-                prompt_to_send = f"Opening scene: '{user_input}'. Continue the story."
-        else:
-            prompt_to_send = user_input
-
+        is_starter = not session.chat_history
+        prompt = "The user wants you to start the story." if (is_starter and user_input.lower() == "start") else user_input
+        
         async with gemini_api_lock:
             genai.configure(api_key=session.gemini_api_key)
             model = genai.GenerativeModel(session.model, system_instruction=session.roleplay_prompt)
             chat = model.start_chat(history=session.chat_history)
-            response = await chat.send_message_async(prompt_to_send)
-            ai_response = response.text
+            response = await chat.send_message_async(prompt)
             session.chat_history = chat.history
-        
-        await send_response(update, ai_response)
-
+            await send_response(update, response.text)
     except Exception as e:
-        logger.error(f"Roleplay Error: {e}")
-        await update.message.reply_text("❌ Error processing request. Check your API key or model availability.", reply_to_message_id=update.message.message_id)
+        logger.error(f"RP Error: {e}")
+        await update.message.reply_text("❌ Error processing request. Try /newchat.")
 
 async def handle_normal_message(update: Update, context: ContextTypes.DEFAULT_TYPE, session: UserSession):
     await update.effective_chat.send_action(ChatAction.TYPING)
     try:
         async with gemini_api_lock:
             genai.configure(api_key=session.gemini_api_key)
-            system_instruction = session.custom_personality_prompt or PERSONALITIES.get(session.personality, PERSONALITIES["default"])
-            model = genai.GenerativeModel(session.model, system_instruction=system_instruction)
+            system_instr = session.custom_personality_prompt or PERSONALITIES.get(session.personality, PERSONALITIES["default"])
+            model = genai.GenerativeModel(session.model, system_instruction=system_instr)
             
             if session.last_file:
-                prompt_parts = [update.message.text, session.last_file]
-                response = await model.generate_content_async(prompt_parts)
+                response = await model.generate_content_async([update.message.text, session.last_file])
                 session.last_file = None
             else:
                 chat = model.start_chat(history=session.chat_history)
                 response = await chat.send_message_async(update.message.text)
                 session.chat_history = chat.history
-        
-        session.message_count += 1
-        await send_response(update, response.text)
+            
+            session.message_count += 1
+            await send_response(update, response.text)
     except Exception as e:
         logger.error(f"Chat Error: {e}")
-        error_msg = str(e)
-        if "API key" in error_msg:
-             await update.message.reply_text("❌ Invalid API Key. Use /setkey to update.", reply_to_message_id=update.message.message_id)
-        else:
-             await update.message.reply_text("❌ An error occurred.", reply_to_message_id=update.message.message_id)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
 
 async def send_response(update: Update, text: str):
     try:
-        # Telegram max message length is 4096
         for i in range(0, len(text), 4096):
             await update.message.reply_text(text[i:i+4096], parse_mode=ParseMode.MARKDOWN, reply_to_message_id=update.message.message_id)
     except BadRequest:
-        # Fallback if Markdown fails
         for i in range(0, len(text), 4096):
             await update.message.reply_text(text[i:i+4096], reply_to_message_id=update.message.message_id)
 
@@ -531,16 +460,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         session = get_or_create_session(query.from_user.id)
         new_model = data.split("_", 1)[1]
         session.change_model(new_model)
-        await query.edit_message_text(f"✅ Model: **{AVAILABLE_MODELS[new_model]['name']}**.", parse_mode=ParseMode.MARKDOWN)
+        await query.edit_message_text(f"✅ Model changed to: **{AVAILABLE_MODELS[new_model]['name']}**", parse_mode=ParseMode.MARKDOWN)
     elif data.startswith("personality_"):
         session = get_or_create_session(query.from_user.id)
-        new_personality = data.split("_", 1)[1]
-        session.change_personality(new_personality)
-        await query.edit_message_text(f"🎭 Personality: **{new_personality.title()}**.", parse_mode=ParseMode.MARKDOWN)
+        new_p = data.split("_", 1)[1]
+        session.change_personality(new_p)
+        await query.edit_message_text(f"🎭 Personality: **{new_p.title()}**", parse_mode=ParseMode.MARKDOWN)
     elif data == "new_chat":
         session = get_or_create_session(query.from_user.id)
         session.clear_chat()
-        await query.edit_message_text(f"🔄 Chat cleared!")
+        await query.edit_message_text("🔄 Chat cleared!")
     elif data == "change_model": await model_command(query, context)
     elif data == "change_personality": await personality_command(query, context)
     elif data == "set_key": await set_key_command(query, context)
@@ -550,33 +479,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def post_init(application: Application) -> None:
     await application.bot.set_my_commands([
-        BotCommand("start", "▶️ Start"),
-        BotCommand("menu", "📱 Menu"),
-        BotCommand("newchat", "🔄 Reset"),
-        BotCommand("roleplay", "🎭 Roleplay"),
-        BotCommand("imagine", "🎨 Image"),
-        BotCommand("undo", "↩️ Undo"),
-        BotCommand("help", "❓ Help")
+        BotCommand("start", "▶️ Start"), BotCommand("menu", "📱 Menu"),
+        BotCommand("newchat", "🔄 Reset"), BotCommand("model", "🤖 Change Model"),
+        BotCommand("roleplay", "🎭 Roleplay"), BotCommand("imagine", "🎨 Image"),
+        BotCommand("undo", "↩️ Undo")
     ])
 
 def main() -> None:
-    # 1. Start the Flask Web Server in a separate thread
-    # This prevents Render from killing the app for not binding to a port.
-    logger.info("Starting Web Server for Render keep-alive...")
     threading.Thread(target=run_web_server, daemon=True).start()
-
-    # 2. Initialize Database
     init_db()
-
-    # 3. Start Telegram Bot
-    if not TELEGRAM_BOT_TOKEN:
-        logger.error("No TELEGRAM_BOT_TOKEN found. Exiting.")
-        return
-
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    if not TELEGRAM_BOT_TOKEN: return
     
-    # Handlers
-    handlers = [
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    app.add_handlers([
         CommandHandler("start", start), CommandHandler("menu", menu),
         CommandHandler("setkey", set_key_command), CommandHandler("personality", personality_command),
         CommandHandler("roleplay", roleplay_command), CommandHandler("imagine", imagine_command), 
@@ -586,15 +501,9 @@ def main() -> None:
         CallbackQueryHandler(button_callback),
         MessageHandler(filters.PHOTO | filters.Document.ALL, handle_file),
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
-    ]
-    application.add_handlers(handlers)
-    
-    # Register Error Handler
-    application.add_error_handler(error_handler)
-
-    logger.info("Bot is polling...")
-    # allowed_updates explicitly set to handle generic updates
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    ])
+    app.add_error_handler(error_handler)
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
